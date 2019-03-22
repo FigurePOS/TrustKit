@@ -1,12 +1,12 @@
 /*
- 
+
  TSKSPKIHashCache.m
  TrustKit
- 
+
  Copyright 2015 The TrustKit Project Authors
  Licensed under the MIT license, see associated LICENSE file for terms.
  See AUTHORS file for the list of project authors.
- 
+
  */
 
 #import "TSKSPKIHashCache.h"
@@ -119,7 +119,7 @@ static const NSString *kTSKKeychainPublicKeyTag = @"TSKKeychainPublicKeyTag"; //
         // Ensure a non-nil identifier was provided
         NSAssert(uniqueIdentifier, @"TSKSPKIHashCache initializer must be passed a unique identifier");
         _spkiCacheFilename = uniqueIdentifier;
-        
+
         // First try to load a cached version from the filesystem
         _subjectPublicKeyInfoHashesCache = [self loadSPKICacheFromFileSystem];
         TSKLog(@"Loaded %lu SPKI cache entries from the filesystem", (unsigned long)_subjectPublicKeyInfoHashesCache.count);
@@ -127,7 +127,7 @@ static const NSString *kTSKKeychainPublicKeyTag = @"TSKKeychainPublicKeyTag"; //
         {
             _subjectPublicKeyInfoHashesCache = [NSMutableDictionary new];
         }
-        
+
         // Initialize any sub-dictionnary that hasn't been initialized
         for (int i=0; i<=TSKPublicKeyAlgorithmLast; i++)
         {
@@ -136,9 +136,9 @@ static const NSString *kTSKKeychainPublicKeyTag = @"TSKKeychainPublicKeyTag"; //
             {
                 _subjectPublicKeyInfoHashesCache[algorithmKey] = [NSMutableDictionary new];
             }
-            
+
         }
-        
+
 #if LEGACY_IOS_KEY_EXTRACTION
         _keychainQueue = dispatch_queue_create("TSKSPKIKeychainLock", DISPATCH_QUEUE_SERIAL);
         // Cleanup the Keychain in case the App previously crashed
@@ -158,23 +158,23 @@ static const NSString *kTSKKeychainPublicKeyTag = @"TSKKeychainPublicKeyTag"; //
 {
     __block NSData *cachedSubjectPublicKeyInfo;
     NSNumber *algorithmKey = [NSNumber numberWithInt:publicKeyAlgorithm];
-    
+
     // Have we seen this certificate before? Look for the SPKI in the cache
     NSData *certificateData = (__bridge_transfer NSData *)(SecCertificateCopyData(certificate));
-    
+
     dispatch_sync(_lockQueue, ^{
         cachedSubjectPublicKeyInfo = _subjectPublicKeyInfoHashesCache[algorithmKey][certificateData];
     });
-    
+
     if (cachedSubjectPublicKeyInfo)
     {
         TSKLog(@"Subject Public Key Info hash was found in the cache");
         return cachedSubjectPublicKeyInfo;
     }
-    
+
     // We didn't this certificate in the cache so we need to generate its SPKI hash
     TSKLog(@"Generating Subject Public Key Info hash...");
-    
+
     // First extract the public key bytes
     NSData *publicKeyData = [self getPublicKeyDataFromCertificate:certificate];
     if (publicKeyData == nil)
@@ -182,26 +182,26 @@ static const NSString *kTSKKeychainPublicKeyTag = @"TSKKeychainPublicKeyTag"; //
         TSKLog(@"Error - could not extract the public key bytes");
         return nil;
     }
-    
-    
+
+
     // Generate a hash of the subject public key info
     NSMutableData *subjectPublicKeyInfoHash = [NSMutableData dataWithLength:CC_SHA256_DIGEST_LENGTH];
     CC_SHA256_CTX shaCtx;
     CC_SHA256_Init(&shaCtx);
-    
+
     // Add the missing ASN1 header for public keys to re-create the subject public key info
     CC_SHA256_Update(&shaCtx, asn1HeaderBytes[publicKeyAlgorithm], asn1HeaderSizes[publicKeyAlgorithm]);
-    
+
     // Add the public key
     CC_SHA256_Update(&shaCtx, [publicKeyData bytes], (unsigned int)[publicKeyData length]);
     CC_SHA256_Final((unsigned char *)[subjectPublicKeyInfoHash bytes], &shaCtx);
-    
-    
+
+
     // Store the hash in our memory cache
     dispatch_barrier_sync(_lockQueue, ^{
         _subjectPublicKeyInfoHashesCache[algorithmKey][certificateData] = subjectPublicKeyInfoHash;
     });
-    
+
     // Update the cache on the filesystem
     if (self.spkiCacheFilename.length > 0) {
         NSData *serializedSpkiCache = [NSKeyedArchiver archivedDataWithRootObject:_subjectPublicKeyInfoHashesCache];
@@ -211,7 +211,7 @@ static const NSString *kTSKKeychainPublicKeyTag = @"TSKKeychainPublicKeyTag"; //
             TSKLog(@"Could not persist SPKI cache to the filesystem");
         }
     }
-    
+
     return subjectPublicKeyInfoHash;
 }
 
@@ -299,17 +299,19 @@ static const NSString *kTSKKeychainPublicKeyTag = @"TSKKeychainPublicKeyTag"; //
     SecTrustRef trust;
     SecPolicyRef policy = SecPolicyCreateBasicX509();
     SecTrustCreateWithCertificates(certificate, policy, &trust);
-    
+
     // Get a public key reference for the certificate from the trust
-    SecTrustEvaluate(trust, NULL);
+	SecTrustResultType result;
+    SecTrustEvaluate(trust, &result);
+
     SecKeyRef publicKey = SecTrustCopyPublicKey(trust);
     CFRelease(policy);
     CFRelease(trust);
-    
+
     // Obtain the public key bytes from the key reference
     CFDataRef publicKeyData = SecKeyCopyExternalRepresentation(publicKey, NULL);
     CFRelease(publicKey);
-    
+
     return (__bridge_transfer NSData *)publicKeyData;
 }
 
@@ -328,41 +330,42 @@ static const NSString *kTSKKeychainPublicKeyTag = @"TSKKeychainPublicKeyTag"; //
     SecKeyRef publicKey;
     SecTrustRef tempTrust;
     SecPolicyRef policy = SecPolicyCreateBasicX509();
-    
+
     // Get a public key reference from the certificate
     SecTrustCreateWithCertificates(certificate, policy, &tempTrust);
-    SecTrustEvaluate(tempTrust, NULL);
+	SecTrustResultType result;
+    SecTrustEvaluate(tempTrust, &result);
     publicKey = SecTrustCopyPublicKey(tempTrust);
     CFRelease(policy);
     CFRelease(tempTrust);
-    
-    
+
+
     /// Extract the actual bytes from the key reference using the Keychain
     // Prepare the dictionary to add the key
     NSMutableDictionary *peerPublicKeyAdd = [[NSMutableDictionary alloc] init];
     peerPublicKeyAdd[(__bridge id)kSecClass] = (__bridge id)kSecClassKey;
     peerPublicKeyAdd[(__bridge id)kSecAttrApplicationTag] = kTSKKeychainPublicKeyTag;
     peerPublicKeyAdd[(__bridge id)kSecValueRef] = (__bridge id)publicKey;
-    
+
     // Avoid issues with background fetching while the device is locked
     peerPublicKeyAdd[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly;
 
     // Request the key's data to be returned
     peerPublicKeyAdd[(__bridge id)kSecReturnData] = @YES;
-    
+
     // Prepare the dictionary to retrieve and delete the key
     NSMutableDictionary * publicKeyGet = [[NSMutableDictionary alloc] init];
     publicKeyGet[(__bridge id)kSecClass] = (__bridge id)kSecClassKey;
     publicKeyGet[(__bridge id)kSecAttrApplicationTag] = kTSKKeychainPublicKeyTag;
     publicKeyGet[(__bridge id)kSecReturnData] = @YES;
-    
-    
+
+
     // Get the key bytes from the Keychain atomically
     dispatch_sync(self.keychainQueue, ^{
         resultAdd = SecItemAdd((__bridge CFDictionaryRef) peerPublicKeyAdd, (void *)&publicKeyData);
         resultDel = SecItemDelete((__bridge CFDictionaryRef)publicKeyGet);
     });
-    
+
     CFRelease(publicKey);
     if ((resultAdd != errSecSuccess) || (resultDel != errSecSuccess))
     {
@@ -370,7 +373,7 @@ static const NSString *kTSKKeychainPublicKeyTag = @"TSKKeychainPublicKeyTag"; //
         TSKLog(@"Keychain error");
         publicKeyData = nil;
     }
-    
+
     return publicKeyData;
 }
 
@@ -388,7 +391,7 @@ static const NSString *kTSKKeychainPublicKeyTag = @"TSKKeychainPublicKeyTag"; //
 {
     NSData *publicKeyData = nil;
     CFErrorRef error = NULL;
-    
+
     // SecCertificateCopyValues() is macOS only
     NSArray *oids = @[ (__bridge id)kSecOIDX509V1SubjectPublicKey ];
     NSDictionary *certificateValues = (__bridge_transfer NSDictionary *)SecCertificateCopyValues(certificate, (__bridge CFArrayRef)(oids), &error);
@@ -400,7 +403,7 @@ static const NSString *kTSKKeychainPublicKeyTag = @"TSKKeychainPublicKeyTag"; //
         CFRelease(error);
         return nil;
     }
-    
+
     for (NSString *fieldName in certificateValues)
     {
         NSDictionary *fieldDict = certificateValues[fieldName];
